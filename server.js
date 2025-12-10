@@ -114,5 +114,5 @@ app.post("/api/login", async (req, res) => {
 // Start Server
 // ===========================
 app.listen(PORT, () => {
-  console.log(✅ Auto Report Pro secure backend running on port ${PORT});
+  console.log(`✅ Auto Report Pro secure backend running on port ${PORT}`);
 });
