@@ -1,7 +1,7 @@
 // ======= AUTO REPORT PRO BACKEND =======
 import express from "express";
 import pkg from "pg";
-import bcrypt from "bcrypt";
+import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import cors from "cors";
 
