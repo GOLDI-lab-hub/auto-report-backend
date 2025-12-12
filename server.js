@@ -103,8 +103,38 @@ app.post("/api/clients", async (req, res) => {
   }
 });
 
-// ======================= FORGOT PASSWORD (To be added next) =======================
-// You’ll add this later with email reset link support.
+// ========================
+// FORGOT PASSWORD
+// ========================
+app.post("/api/forgot-password", async (req, res) => {
+  const { email, newPassword } = req.body;
+
+  if (!email || !newPassword) {
+    return res.status(400).json({ error: "Email and new password are required" });
+  }
+
+  try {
+    // Check if user exists
+    const userResult = await pool.query("SELECT * FROM users WHERE email = $1", [email]);
+
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    // Hash the new password
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+
+    // Update password in database
+    await pool.query("UPDATE users SET password = $1 WHERE email = $2", [hashedPassword, email]);
+
+    res.json({ message: "Password updated successfully" });
+  } catch (error) {
+    console.error("Error resetting password:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+
 
 // ======================= START SERVER =======================
 const PORT = process.env.PORT || 10000;
