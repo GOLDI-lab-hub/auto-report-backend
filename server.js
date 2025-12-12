@@ -1,185 +1,131 @@
+// ======= AUTO REPORT PRO BACKEND =======
 import express from "express";
-import cors from "cors";
-import dotenv from "dotenv";
 import pkg from "pg";
-import bcrypt from "bcryptjs";
+import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
-import crypto from "crypto";
-
-dotenv.config();
+import cors from "cors";
 
 const { Pool } = pkg;
 const app = express();
+
 app.use(cors());
 app.use(express.json());
 
-// ✅ PostgreSQL connection (same as before)
+// --- PostgreSQL Connection ---
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
 });
 
-// ✅ Authentication middleware
-function authenticateToken(req, res, next) {
-  const authHeader = req.headers["authorization"];
-  const token = authHeader && authHeader.split(" ")[1];
-  if (!token) return res.sendStatus(401);
+const JWT_SECRET = process.env.JWT_SECRET || "supersecretkey";
 
-  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-    if (err) return res.sendStatus(403);
-    req.user = user;
-    next();
-  });
-}
-
-// ✅ Root route
-app.get("/", (req, res) => {
-  res.send("🚀 Auto Report Pro Secure Backend is running with Auto-Register + Password Reset!");
-});
-
-// ✅ Manual Register (still optional)
+// === REGISTER ===
 app.post("/api/register", async (req, res) => {
-  const { name, email, password } = req.body;
   try {
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const result = await pool.query(
-      "INSERT INTO users (name, email, password, created_at) VALUES ($1, $2, $3, NOW()) RETURNING *",
-      [name, email, hashedPassword]
+    const { name, email, password } = req.body;
+    const hashed = await bcrypt.hash(password, 10);
+
+    const user = await pool.query(
+      `INSERT INTO users (name, email, password, trial_start, trial_end, trial_active)
+       VALUES ($1, $2, $3, NOW(), NOW() + INTERVAL '10 days', true)
+       RETURNING id, name, email`,
+      [name, email, hashed]
     );
-    res.json(result.rows[0]);
-  } catch (error) {
-    console.error("Register error:", error);
-    res.status(500).json({ message: "Error registering user" });
-  }
-});
 
-// ✅ Auto-register Login
-app.post("/api/login", async (req, res) => {
-  const { email, password, name } = req.body;
-
-  try {
-    const result = await pool.query("SELECT * FROM users WHERE email = $1", [email]);
-    let user;
-
-    if (result.rows.length === 0) {
-      const hashedPassword = await bcrypt.hash(password, 10);
-      const insertResult = await pool.query(
-        "INSERT INTO users (name, email, password, created_at) VALUES ($1, $2, $3, NOW()) RETURNING *",
-        [name || email.split("@")[0], email, hashedPassword]
-      );
-      user = insertResult.rows[0];
-    } else {
-      user = result.rows[0];
-      const valid = await bcrypt.compare(password, user.password);
-      if (!valid) return res.status(401).json({ message: "Invalid password" });
-    }
-
-    const token = jwt.sign({ id: user.id, email: user.email }, process.env.JWT_SECRET, {
-      expiresIn: "7d",
-    });
-
-    res.json({
-      message: "Login successful",
-      token,
-      user: { id: user.id, name: user.name, email: user.email },
-    });
-  } catch (error) {
-    console.error("Login error:", error);
-    res.status(500).json({ message: "Server error during login" });
-  }
-});
-
-// ✅ Forgot Password: Request reset
-app.post("/api/request-reset", async (req, res) => {
-  const { email } = req.body;
-  try {
-    const result = await pool.query("SELECT * FROM users WHERE email = $1", [email]);
-    if (result.rows.length === 0) {
-      return res.status(404).json({ message: "User not found" });
-    }
-
-    const resetToken = crypto.randomBytes(32).toString("hex");
-    const hashedToken = await bcrypt.hash(resetToken, 10);
-    const expiry = new Date(Date.now() + 15 * 60 * 1000); // 15 min expiry
-
+    // Automatically create empty client entry linked to new user
     await pool.query(
-      "UPDATE users SET reset_token = $1, reset_expires = $2 WHERE email = $3",
-      [hashedToken, expiry, email]
+      `INSERT INTO clients (name, email, google_ads_id, meta_ads_id, user_id)
+       VALUES ($1, $2, '', '', $3)`,
+      [name, email, user.rows[0].id]
     );
 
-    // ✅ In real setup: send resetToken by email — for now, return in response for testing
-    res.json({
-      message: "Password reset link generated successfully",
-      resetToken,
-      note: "Use this token in /api/reset-password within 15 minutes",
-    });
-  } catch (error) {
-    console.error("Reset request error:", error);
-    res.status(500).json({ message: "Error generating password reset" });
+    res.json({ message: "Registration successful", user: user.rows[0] });
+  } catch (err) {
+    console.error("Error registering user:", err);
+    res.status(500).json({ error: "Server error during registration" });
   }
 });
 
-// ✅ Reset Password: Confirm token and update
-app.post("/api/reset-password", async (req, res) => {
-  const { email, token, newPassword } = req.body;
+// === LOGIN ===
+app.post("/api/login", async (req, res) => {
   try {
-    const result = await pool.query("SELECT * FROM users WHERE email = $1", [email]);
-    if (result.rows.length === 0) return res.status(404).json({ message: "User not found" });
+    const { email, password } = req.body;
+
+    const result = await pool.query("SELECT * FROM users WHERE email=$1", [email]);
+    if (result.rows.length === 0)
+      return res.status(401).json({ error: "Invalid credentials" });
 
     const user = result.rows[0];
-    if (!user.reset_token || !user.reset_expires) {
-      return res.status(400).json({ message: "No reset request found" });
-    }
+    const valid = await bcrypt.compare(password, user.password);
+    if (!valid) return res.status(401).json({ error: "Invalid credentials" });
 
-    if (new Date(user.reset_expires) < new Date()) {
-      return res.status(400).json({ message: "Reset token expired" });
-    }
-
-    const isMatch = await bcrypt.compare(token, user.reset_token);
-    if (!isMatch) return res.status(400).json({ message: "Invalid reset token" });
-
-    const hashedPassword = await bcrypt.hash(newPassword, 10);
-    await pool.query(
-      "UPDATE users SET password = $1, reset_token = NULL, reset_expires = NULL WHERE email = $2",
-      [hashedPassword, email]
-    );
-
-    res.json({ message: "Password reset successful. You can now log in with your new password." });
-  } catch (error) {
-    console.error("Password reset error:", error);
-    res.status(500).json({ message: "Error resetting password" });
+    const token = jwt.sign({ id: user.id }, JWT_SECRET, { expiresIn: "7d" });
+    res.json({ token, user });
+  } catch (err) {
+    console.error("Login error:", err);
+    res.status(500).json({ error: "Server error" });
   }
 });
 
-// ✅ Save client (linked to logged-in user)
-app.post("/api/clients", authenticateToken, async (req, res) => {
-  const { client_name, client_email, google_ads_id, meta_ads_id } = req.body;
-  const user_id = req.user.id;
-
+// === ADD CLIENT (Manual or Auto Expansion) ===
+app.post("/api/clients", async (req, res) => {
   try {
+    const { name, email, google_ads_id, meta_ads_id, user_id } = req.body;
+
     const result = await pool.query(
-      "INSERT INTO clients (user_id, client_name, client_email, google_ads_id, meta_ads_id) VALUES ($1, $2, $3, $4, $5) RETURNING *",
-      [user_id, client_name, client_email, google_ads_id, meta_ads_id]
+      `INSERT INTO clients (name, email, google_ads_id, meta_ads_id, user_id)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING *`,
+      [name, email, google_ads_id, meta_ads_id, user_id]
     );
+
     res.json(result.rows[0]);
-  } catch (error) {
-    console.error("Error saving client:", error);
-    res.status(500).json({ message: "Error saving client" });
+  } catch (err) {
+    console.error("Error saving client:", err);
+    res.status(500).json({ error: "Server error while saving client" });
   }
 });
 
-// ✅ Get all clients for the logged-in user
-app.get("/api/clients", authenticateToken, async (req, res) => {
-  const user_id = req.user.id;
+// === FORGOT PASSWORD ===
+app.post("/api/forgot-password", async (req, res) => {
   try {
-    const result = await pool.query("SELECT * FROM clients WHERE user_id = $1", [user_id]);
-    res.json(result.rows);
-  } catch (error) {
-    console.error("Error fetching clients:", error);
-    res.status(500).json({ message: "Error fetching clients" });
+    const { email } = req.body;
+    const user = await pool.query("SELECT * FROM users WHERE email=$1", [email]);
+    if (user.rows.length === 0)
+      return res.status(404).json({ error: "Email not found" });
+
+    const resetToken = jwt.sign({ email }, JWT_SECRET, { expiresIn: "10m" });
+    await pool.query("UPDATE users SET reset_token=$1 WHERE email=$2", [
+      resetToken,
+      email,
+    ]);
+
+    // Later we’ll send email with reset link
+    res.json({ message: "Password reset link generated", token: resetToken });
+  } catch (err) {
+    console.error("Forgot password error:", err);
+    res.status(500).json({ error: "Server error" });
   }
 });
 
-// ✅ Server Listen
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
+// === RESET PASSWORD ===
+app.post("/api/reset-password", async (req, res) => {
+  try {
+    const { token, newPassword } = req.body;
+    const decoded = jwt.verify(token, JWT_SECRET);
+    const hashed = await bcrypt.hash(newPassword, 10);
+
+    await pool.query(
+      "UPDATE users SET password=$1, reset_token=NULL WHERE email=$2",
+      [hashed, decoded.email]
+    );
+
+    res.json({ message: "Password reset successful" });
+  } catch (err) {
+    console.error("Reset password error:", err);
+    res.status(500).json({ error: "Invalid or expired reset link" });
+  }
+});
+
+const port = process.env.PORT || 10000;
+app.listen(port, () => console.log(`✅ Server running on port ${port}`));
