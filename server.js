@@ -1,110 +1,111 @@
+// server.js
 import express from "express";
 import cors from "cors";
-import pkg from "pg";
-import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
+import pg from "pg";
+import bcrypt from "bcrypt";
+import dotenv from "dotenv";
 
-const { Pool } = pkg;
+dotenv.config();
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ✅ Database Connection
-const pool = new Pool({
+// PostgreSQL connection
+const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
 });
 
-// ✅ Health Check Route (for Render)
-app.get("/", (req, res) => {
-  res.send("✅ Auto Report Backend is running!");
-});
-
+// Health check
 app.get("/api/health", (req, res) => {
-  res.json({ status: "ok" });
+  res.send("✅ Backend is running fine!");
 });
 
-// ✅ User Registration
+// ======================= REGISTER =======================
 app.post("/api/register", async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { name, email, password } = req.body;
+
+    console.log("📩 Received registration data:", { name, email, password });
+
+    if (!name || !email || !password) {
+      return res.status(400).json({ message: "All fields (name, email, password) are required." });
+    }
+
+    // Check if user already exists
+    const existingUser = await pool.query("SELECT * FROM users WHERE email = $1", [email]);
+    if (existingUser.rows.length > 0) {
+      return res.status(400).json({ message: "User already exists" });
+    }
+
+    // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    const existingUser = await pool.query("SELECT * FROM users WHERE email = $1", [email]);
-    if (existingUser.rows.length > 0)
-      return res.status(400).json({ message: "User already exists" });
-
-    await pool.query(
-      "INSERT INTO users (email, password, trial_start, trial_end, trial_active) VALUES ($1, $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + INTERVAL '10 days', TRUE)",
-      [email, hashedPassword]
+    // Insert user into database
+    const result = await pool.query(
+      `INSERT INTO users (name, email, password, trial_start, trial_end, trial_active)
+       VALUES ($1, $2, $3, NOW(), NOW() + INTERVAL '10 days', TRUE)
+       RETURNING id, name, email, trial_start, trial_end, trial_active`,
+      [name, email, hashedPassword]
     );
 
-    res.status(201).json({ message: "User registered successfully" });
-  } catch (err) {
-    console.error("Error registering user:", err);
+    console.log("✅ User created:", result.rows[0]);
+    res.status(201).json({ message: "User registered successfully", user: result.rows[0] });
+  } catch (error) {
+    console.error("❌ Error registering user:", error);
     res.status(500).json({ message: "Server error during registration" });
   }
 });
 
-// ✅ Login
+// ======================= LOGIN =======================
 app.post("/api/login", async (req, res) => {
   try {
     const { email, password } = req.body;
-    const userResult = await pool.query("SELECT * FROM users WHERE email = $1", [email]);
-    if (userResult.rows.length === 0)
-      return res.status(400).json({ message: "Invalid email or password" });
+    const result = await pool.query("SELECT * FROM users WHERE email = $1", [email]);
 
-    const user = userResult.rows[0];
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) return res.status(400).json({ message: "Invalid email or password" });
+    if (result.rows.length === 0) {
+      return res.status(401).json({ message: "Invalid credentials" });
+    }
 
-    const token = jwt.sign({ userId: user.id }, process.env.JWT_SECRET || "secretkey", {
-      expiresIn: "1h",
-    });
+    const user = result.rows[0];
+    const valid = await bcrypt.compare(password, user.password);
 
-    res.json({ message: "Login successful", token });
-  } catch (err) {
-    console.error("Error logging in:", err);
+    if (!valid) {
+      return res.status(401).json({ message: "Invalid credentials" });
+    }
+
+    res.json({ message: "Login successful", user });
+  } catch (error) {
+    console.error("❌ Error logging in:", error);
     res.status(500).json({ message: "Server error during login" });
   }
 });
 
-// ✅ Forgot Password (Reset)
-app.post("/api/forgot-password", async (req, res) => {
-  try {
-    const { email, newPassword } = req.body;
-    const hashedPassword = await bcrypt.hash(newPassword, 10);
-
-    const userResult = await pool.query("SELECT * FROM users WHERE email = $1", [email]);
-    if (userResult.rows.length === 0)
-      return res.status(404).json({ message: "User not found" });
-
-    await pool.query("UPDATE users SET password = $1 WHERE email = $2", [hashedPassword, email]);
-    res.json({ message: "Password reset successful" });
-  } catch (err) {
-    console.error("Error resetting password:", err);
-    res.status(500).json({ message: "Server error during password reset" });
-  }
-});
-
-// ✅ Save Client (linked to user)
+// ======================= SAVE CLIENT =======================
 app.post("/api/clients", async (req, res) => {
   try {
     const { name, email, google_ads_id, meta_ads_id, user_id } = req.body;
 
-    if (!user_id) return res.status(400).json({ message: "Missing user ID" });
+    if (!name || !email || !google_ads_id || !meta_ads_id || !user_id) {
+      return res.status(400).json({ message: "All fields are required." });
+    }
 
-    await pool.query(
-      "INSERT INTO clients (name, email, google_ads_id, meta_ads_id, user_id) VALUES ($1, $2, $3, $4, $5)",
+    const result = await pool.query(
+      `INSERT INTO clients (name, email, google_ads_id, meta_ads_id, user_id)
+       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
       [name, email, google_ads_id, meta_ads_id, user_id]
     );
 
-    res.status(201).json({ message: "Client saved successfully" });
-  } catch (err) {
-    console.error("Error saving client:", err);
+    res.status(201).json({ message: "Client saved successfully", client: result.rows[0] });
+  } catch (error) {
+    console.error("❌ Error saving client:", error);
     res.status(500).json({ message: "Server error while saving client" });
   }
 });
 
+// ======================= FORGOT PASSWORD (To be added next) =======================
+// You’ll add this later with email reset link support.
+
+// ======================= START SERVER =======================
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Server running on port: ${PORT}`));
